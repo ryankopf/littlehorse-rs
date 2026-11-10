@@ -1,0 +1,410 @@
+syntax = "proto3";
+
+package littlehorse;
+
+// import "google/protobuf/timestamp.proto";
+import "common_enums.proto";
+import "object_id.proto";
+import "type_definition.proto";
+
+option go_package = ".;lhproto";
+option java_multiple_files = true;
+option java_package = "io.littlehorse.sdk.common.proto";
+option csharp_namespace = "LittleHorse.Sdk.Common.Proto";
+
+// A VariableAssignment is used within a WfSpec to determine how a value should be
+// assigned in the context of a specific WfRun. For example, in a TASK node, you
+// use a VariableAssignment for each input parameter to determine how the value
+// is set.
+//
+// Note that the VariableAssignment is normally handled by the SDK; you shouldn't
+// have to worry about this in daily LittleHorse usage.
+message VariableAssignment {
+  // A FormatString formats a template String with values from the WfRun.
+  message FormatString {
+    // A VariableAssignment which must resolve to a String that has format args.
+    // A valid string is "This is a format string with three args: {0}, {1}, {2}"
+    VariableAssignment format = 1;
+
+    // VariableAssignments which fill out the args.
+    repeated VariableAssignment args = 2;
+  }
+
+  // A NodeOutputReference allows you to assign a value by getting the output of
+  // a NodeRun from a specified Node. If there are multiple NodeRun's of the specified
+  // Node (for example, if there is a loop in the ThreadSpec), then the most recent
+  // NodeRun is used. Can only specify a Node that is in the same ThreadSpec.
+  message NodeOutputReference {
+    // The name of the Node to pull output from.
+    string node_name = 1;
+  }
+
+  // A SizeOf operation evaluates to the number of elements in a STR, JSON_ARR, or ARRAY value.
+  message SizeOf {
+    // The value whose size should be resolved.
+    VariableAssignment operand = 1;
+  }
+
+  // An Expression allows you to combine multiple values into one.
+  message Expression {
+    // The left-hand-side of the expression.
+    VariableAssignment lhs = 1;
+
+    // The operator in the expression. Determines how lhs and rhs are evaluated.
+    //
+    // - Use `mutation_type` for arithmetic, collection, or logical boolean operations (AND, OR).
+    //   These produce a value whose type depends on the operands and operation.
+    //
+    // - Use `comparator` for comparison operations. These always evaluate to a BOOL.
+    //   These two operation types are kept separate because of compatibility reasons.
+    oneof operation {
+      VariableMutationType mutation_type = 2;
+      Comparator comparator = 4;
+    }
+
+    // The right-hand-side of the expression.
+    VariableAssignment rhs = 3;
+  }
+
+  // If you provide a `variable_name` and the specified variable is a JSON_OBJ, JSON_ARR, ARRAY or
+  // STRUCT type, then you may provide a `path` for querying data within your object.
+  oneof path {
+    // DEPRECATED: A String path formatted in the `JSONPath` format.
+    // Supported on JSON_OBJ and JSON_ARR.
+    string json_path = 1;
+
+    // A path resolving to a field in your object.
+    // Supported on Struct, Array, and JSON_OBJ.
+    LHPath lh_path = 8;
+  }
+
+  // The oneof determines where the value is resolved to.
+  oneof source {
+    // Assign the value from a variable.
+    string variable_name = 2;
+    // Assign a literal value
+    VariableValue literal_value = 3;
+    // Assign a format string
+    FormatString format_string = 4;
+    // Assign the value of a NodeOutput.
+    NodeOutputReference node_output = 5;
+    // Assign the value of an Expression.
+    Expression expression = 6;
+    // Builds a Struct using data available in the ThreadRun.
+    StructBuilder struct_builder = 9;
+    // Assign the size of the resolved operand value.
+    // Valid for STR, ARRAY, and JSON_ARR values.
+    SizeOf size_of = 10;
+    // Builds a native Map using data available in the ThreadRun.
+    MapBuilder map_builder = 11;
+  }
+
+  // If specified, the resolved value will be cast to this type before being used.
+  // This allows explicit type conversions anywhere VariableAssignment is used.
+  // The cast operation is non-mutating: original values remain unchanged.
+  // Note: Only primitive type conversions are supported.
+  optional TypeDefinition target_type = 7;
+}
+
+// Builds a Struct using data available in the context of this ThreadRun.
+message StructBuilder {
+  // The ID of the StructDef we're building. If the version is -1, it uses the latest.
+  StructDefId struct_def_id = 1;
+
+  // Determines the content of the InlineStruct.
+  InlineStructBuilder value = 2;
+}
+
+// Builds an InlineStruct from values available to a ThreadRun.
+message InlineStructBuilder {
+  // Determines the values for each field in the resulting InlineStruct.
+  map<string, InlineStructFieldValue> fields = 1;
+}
+
+message InlineStructFieldValue {
+  // Determines the Source value for this field.
+  oneof struct_value {
+    // Simple value that already exists in the context of the ThreadRun.
+    VariableAssignment simple_value = 1;
+
+    // Builds a nested sub-structure of a Struct.
+    InlineStructBuilder sub_structure = 2;
+  }
+}
+
+// Builds a native Map using data available in the context of this ThreadRun.
+// This is the Map analog of StructBuilder, and permits dynamic (runtime-resolved)
+// keys and values, which a literal `Map` cannot express.
+message MapBuilder {
+  // A single dynamically-resolved key/value entry.
+  message Entry {
+    // Resolves to the key. Must resolve to a primitive type.
+    VariableAssignment key = 1;
+
+    // Resolves to the value.
+    VariableAssignment value = 2;
+  }
+
+  // The entries of the resulting Map. If two entries resolve to the same key
+  // at runtime, the last entry wins.
+  repeated Entry entries = 1;
+
+  // Authoritative key/value types for the resulting Map, mirroring `Map.map_type`.
+  // If absent, the types are derived from the resolved entries at validation time; a
+  // MapBuilder that cannot resolve to a concrete key/value type (e.g. an empty builder with
+  // no declared type) is rejected. The resulting Map always carries a concrete type.
+  optional InlineMapDef map_type = 2;
+}
+
+// Enumerates the available operations to mutate a variable in a WfRun.
+enum VariableMutationType {
+  // Set the variable specified by the LHS to the value of the RHS.
+  ASSIGN = 0;
+  // Add the RHS to the LHS.
+  ADD = 1;
+  // Append the RHS to the LHS (valid if the LHS is a STR, JSON_ARR, or ARRAY)
+  EXTEND = 2;
+  // Subtract the RHS from the LHS (both must be INT or DOUBLE)
+  SUBTRACT = 3;
+  // Multiply the LHS by the RHS (both must be INT or DOUBLE)
+  MULTIPLY = 4;
+  // Divide the LHS by the RHS (both must be INT or DOUBLE)
+  DIVIDE = 5;
+  // Remove any occurrences of RHS from LHS (LHS must be JSON_ARR or ARRAY)
+  REMOVE_IF_PRESENT = 6;
+  // Remove item at index RHS from LHS (LHS must be JSON_ARR or ARRAY)
+  REMOVE_INDEX = 7;
+  // Remove the key specified by RHS from the LHS (LHS must be JSON_OBJ)
+  REMOVE_KEY = 8;
+  // Logical AND operation. Combines two boolean values; result is true if both LHS and RHS are true.
+  AND = 9;
+  // Logical OR operation. Combines two boolean values; result is true if either LHS or RHS is true.
+  OR = 10;
+  // Raise the LHS to the power of the RHS (both must be INT or DOUBLE)
+  POW = 11;
+}
+
+// A VariableMutation defines a modification made to one of a ThreadRun's variables.
+// The LHS determines the variable that is modified; the operation determines how
+// it is modified, and the RHS is the input to the operation.
+//
+// Day-to-day users of LittleHorse generally don't interact with this structure unless
+// they are writing their own WfSpec SDK.
+message VariableMutation {
+  // Specifies to use the output of a NodeRun as the RHS.
+  message NodeOutputSource {
+    // Use this specific field from a Struct, JSON_OBJ, JSON_ARR, or ARRAY output
+    oneof path {
+      // DEPRECATED: A String path formatted in the `JSONPath` format.
+      // Supported on JSON_OBJ and JSON_ARR.
+      string jsonpath = 10;
+
+      // A path resolving to a field in your object.
+      // Supported on Struct, JSON_OBJ, JSON_ARR, or ARRAY.
+      LHPath lh_path = 11;
+    }
+  }
+
+  // The name of the variable to mutate
+  string lhs_name = 1;
+
+  // For JSON_ARR and JSON_OBJ variables, this allows you to optionally mutate
+  // a specific sub-field of the variable.
+  optional string lhs_json_path = 2;
+
+  // A typed path resolving to a nested value to mutate. Supports Struct,
+  // Array, JSON, and Map values.
+  optional LHPath lhs_lh_path = 7;
+
+  // Defines the operation that we are executing.
+  VariableMutationType operation = 3;
+
+  // The RHS of the mutation; i.e. what is operated _with_. Note the values other
+  // than `rhs_assignment` are deprecated and will be removed in 2.0.
+  //
+  // As of 0.12.0, the SDK's only use rhs_assignment.
+  oneof rhs_value {
+    // Assigns the value to be used as the RHS of the mutation.
+    VariableAssignment rhs_assignment = 4;
+
+    // Use a literal value as the RHS. DEPRECATED: use rhs_assignment.literal_value
+    // instead.
+    VariableValue literal_value = 5;
+
+    // Use the output of the current node as the RHS. DEPRECATED: use
+    // rhs_assignment.node_output instead.
+    NodeOutputSource node_output = 6;
+  }
+}
+
+// Declares a Variable; used in a ThreadSpec and a TaskDef.
+message VariableDef {
+  // DEPRECATED: The Type of the variable.
+  //
+  // After 0.13.2, this has been replaced by the nested `TypeDefinition` field.
+  // We retain this field for compatibility purposes but clients should not use
+  // it going forward. To be removed in a future release.
+  optional VariableType type = 1;
+
+  // The name of the variable.
+  string name = 2;
+
+  // Optional default value if the variable isn't set; for example, in a ThreadRun
+  // if you start a ThreadRun or WfRun without passing a variable in, then this is
+  // used.
+  optional VariableValue default_value = 3;
+
+  // DEPRECATED: If true, the variable value will show as a masked string.
+  //
+  // After 0.13.2, this has been replaced by the nested `TypeDefinition` field.
+  // We retain this field for compatibility purposes but clients should not use
+  // it going forward. To be removed in a future release.
+  optional bool masked_value = 4;
+
+  // Type Information for this variable.
+  //
+  // This is the default as of 0.13.2 and will become the only supported way
+  // (i.e. it will be no longer `optional`).
+  optional TypeDefinition type_def = 5;
+}
+
+// TypeDefinition and related messages were moved to type_definition.proto to
+// avoid circular imports between variable.proto and common_wfspec.proto.
+
+// A UTActionTrigger triggers an action upon certain lifecycle hooks
+// in a User Task. Actions include:
+// - re-assign the User Task Run
+// - cancel the User Task Run
+// - execute a Reminder Task
+//
+// Hooks include:
+// - Upon creation of the UserTaskRun
+// - Upon rescheduling the UserTaskRun
+message UTActionTrigger {
+  // A UserTaskAction that causes a UserTaskRun to be CANCELLED when it fires.
+  message UTACancel {
+  }
+
+  // A UserTaskAction that causes a TaskRun to be scheduled when it fires.
+  message UTATask {
+    // The specification of the Task to schedule.
+    TaskNode task = 1;
+
+    // EXPERIMENTAL: Any variables in the ThreadRun which we should mutate.
+    repeated VariableMutation mutations = 2;
+  }
+
+  // A UserTaskAction that causes a UserTaskRun to be reassigned when it fires.
+  message UTAReassign {
+    // A variable assignment that resolves to a STR representing the new user_id. If
+    // not set, the user_id of the UserTaskRun will be un-set.
+    optional VariableAssignment user_id = 1;
+
+    // A variable assignment that resolves to a STR representing the new user_group. If
+    // not set, the user_group of the UserTaskRun will be un-set.
+    optional VariableAssignment user_group = 2;
+  }
+
+  // The action that is scheduled by the hook
+  oneof action {
+    // Schedule a Reminder Task.
+    UTATask task = 1;
+    // Cancel the UserTaskRun.
+    UTACancel cancel = 2;
+    // Reassign the UserTaskRun to a different user or user group.
+    UTAReassign reassign = 3;
+    // later on, might enable scheduling entire ThreadRuns
+  }
+
+  // The Action is triggered some time after the Hook matures. The delay is controlled
+  // by this field.
+  VariableAssignment delay_seconds = 5;
+
+  // Enumerates the different lifecycle hooks that can cause the timer to start running.
+  enum UTHook {
+    // The hook should be scheduled `delay_seconds` after the UserTaskRun is created. This
+    // hook only causes the action to be scheduled once.
+    ON_ARRIVAL = 0;
+
+    // The hook should be scheduled `delay_seconds` after the ownership of the UserTaskRun
+    // changes. This hook causes the Action to be scheduled one or more times. The first
+    // time is scheduled when the UserTaskRun is created, since we treat the change from
+    // "UserTaskRun is nonexistent" to "UserTaskRun is owned by a userId or userGroup" as
+    // a change in ownership.
+    ON_TASK_ASSIGNED = 1;
+  }
+
+  // The hook on which this UserTaskAction is scheduled.
+  UTHook hook = 6;
+}
+
+// Defines an Exponential backoff policy for TaskRun retries. The delay for a retry
+// attempt `N` is defined as:
+//
+// min(base_interval_ms * (multiplier ^(N-1)), max_delay_ms)
+//
+// Note that timers in LittleHorse have a resolution of about 500-1000 milliseconds,
+// so timing is not exact.
+message ExponentialBackoffRetryPolicy {
+    // Base delay in ms for the first retry. Note that in LittleHorse, timers have a
+    // resolution of 500-1000 milliseconds. Must be greater than zero.
+    int32 base_interval_ms = 1;
+
+    // Maximum delay in milliseconds between retries.
+    int64 max_delay_ms = 2;
+
+    // The multiplier to use in calculating the retry backoff policy. We recommend
+    // starting with 2.0. Must be at least 1.0.
+    float multiplier = 3;
+}
+
+// Defines a TaskRun execution. Used in a Node and also in the UserTask Trigger Actions.
+message TaskNode {
+  // The type of TaskRun to schedule.
+  oneof task_to_execute {
+    TaskDefId task_def_id = 1;
+    VariableAssignment dynamic_task = 6;
+  }
+
+  // How long until LittleHorse determines that the Task Worker had a technical ERROR if
+  // the worker does not yet reply to the Server. This is determined on a per-Attempt
+  // basis.
+  int32 timeout_seconds = 2;
+
+  // Configures the amount of retries allowed on this TaskNode.
+  //
+  // Retryable errors include:
+  // - TASK_TIMEOUT: the TaskRun was started but the scheduler didn't hear back from the
+  //   Task Worker in time.
+  // - TASK_FAILED: the Task Worker reported an unexpected *technical* ERROR when executing
+  //   the Task Function.
+  //
+  // Other result codes are not retryable (including TASK_OUTPUT_SERDE_ERROR,
+  // TASK_INPUT_VAR_SUB_ERROR, and TASK_EXCEPTION).
+  int32 retries = 3;
+
+  // If this field is set, then retries will use Exponential Backoff.
+  optional ExponentialBackoffRetryPolicy exponential_backoff = 5;
+
+  // Input variables into the TaskDef.
+  repeated VariableAssignment variables = 4;
+}
+
+// A path of repeated Selectors resolving to a nested field in an object.
+message LHPath {
+  message Selector {
+    oneof selector_type {
+      // The name of the field you want to access from a JSON_OBJ or Struct
+      string key = 1;
+
+      // The index of the item you want to access from a JSON_ARR or Array
+      int32 index = 2;
+
+      // A selector value resolved from the current ThreadRun context.
+      VariableAssignment dynamic = 3;
+    }
+  }
+
+  // The path of selectors that resolve to the field you want to access.
+  repeated Selector path = 1;
+}

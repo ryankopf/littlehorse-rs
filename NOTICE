@@ -1,0 +1,7 @@
+This product includes public protocol schemas from LittleHorse master 195c632640acf38352441bff6ef79b92474dab1a.
+Copyright LittleHorse Enterprises LLC.
+Upstream: https://github.com/littlehorse-enterprises/littlehorse
+Licensed under the Apache License, Version 2.0.
+The Java workflow conformance fixtures in conformance/areas are copied from
+LittleHorse master 195c632640acf38352441bff6ef79b92474dab1a sdk-conformance/areas, under the same license.
+The upstream Node conformance grader in conformance/*.mjs has the same provenance.
